@@ -279,7 +279,7 @@ void Control::operator()(Motor &m)
     // current loop
     vdq[0] = pi_id(idq[0] - m.Id, -m.oe * m.Iq * Ls);
     vdq[1] = pi_iq(idq[1] - m.Iq, m.oe * (Ls * m.Id + Ke));
-    double a = 0;
+    double a = m.theta;
     if (use_estimator) {
         a = a_est.angle;
     }
@@ -301,13 +301,13 @@ int main()
     Motor motor(s, ctrl);
     ctrl(motor);
     motor.Vbus = VBUS;
-    ctrl.idq[1] = 2.0;
+    ctrl.idq[1] = -2.0;
     while (t < t_end) {
         asc::Sampler sampler(t, dt);
         if (t > 1.0)
             ctrl.idq[1] = -2.0;
-        if (t > 1e-2)
-            ctrl.use_estimator = true;
+        //if (t > 1e-2)
+        //    ctrl.use_estimator = true;
         if (pwm(sampler, t))
             ctrl(motor);
         r1({t, motor.oe, motor.theta});
