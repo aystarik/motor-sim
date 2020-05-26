@@ -93,6 +93,19 @@ struct PIRegulator {
     }
 };
 
+template <typename T>
+struct PIRegS {
+    T Ka, Kb;
+    T sum;
+    PIRegS(): Ka{0}, Kb{0}, sum(0) {}
+    T operator()(const T err) {
+        T out = Ka * err;
+        sum += Kb * out;
+        out += sum;
+        return out;
+    }
+};
+
 // RP34M-221V48 540W NEMA34 motor
 static const double VBUS = 48;
 static const double Rs = 0.15;
@@ -121,21 +134,24 @@ template <typename T>
 struct AngleEstimator {
     const T Ts;
     T Vr_a, Vr_b;
+    T Va, Vb;
     T Vemf_a, Vemf_b;
+    T Vemf_a_ref, Vemf_b_ref;
     T angle;
-    T omega, omega_sum;
+    T omega;
     T angle_err;
-    T K1, K2;
-    PIReg<T> pi_bemf_a, pi_bemf_b;
+    PIRegS<T> omega_pi;
+    PIRegS<T> pi_bemf_a, pi_bemf_b;
     AngleEstimator(const T _Ts) : Ts(_Ts) {
         Vr_a = Vr_b = Vemf_a = Vemf_b = 0;
-        omega_sum = omega = angle = 0.0;
-        pi_bemf_a.Kp = pi_bemf_b.Kp = 10.0;
-        pi_bemf_a.Ki = pi_bemf_b.Ki = Ts;
-        K1 = 1000.0;
-        K2 = 1e6;
+        Vemf_a_ref = Vemf_b_ref = 0;
+        omega = angle = 0.0;
+        pi_bemf_a.Ka = pi_bemf_b.Ka = 1;
+        pi_bemf_a.Kb = pi_bemf_b.Kb = Ts*1000;
+        omega_pi.Ka = 80;
+        omega_pi.Kb = Ts*20;
     }
-    void operator()(Motor &motor, T Va, T Vb, T Ia, T Ib);
+    void operator()(Motor &motor);
 };
 
 
@@ -150,9 +166,9 @@ struct Control {
     AngleEstimator<double> a_est;
     bool use_estimator;
     Control(CAPWM &_pwm) : pwm(_pwm), idq{0}, vdq{0}, vab{0}, vabc{0}, a_est (pwm.ts) {
-        pi_iq.Ka = pi_id.Ka = Ls * 2 * M_PI * 12000;
+        pi_iq.Ka = pi_id.Ka = Ls * 2 * M_PI * 4000;
         pi_iq.Kb = pi_id.Kb = pwm.ts * Rs/Ls;
-        pi_id.limit = pi_iq.limit = VBUS*1.15;
+        pi_id.limit = pi_iq.limit = VBUS*1.15/2;
         use_estimator = false;
     }
     void operator()(Motor &m);
@@ -188,7 +204,8 @@ static inline void park(const double sin_phi, const double cos_phi, const array<
 
 const double R1 = 82e3;
 const double R2 = 5e3;
-const double C = 47e-9;
+const double C = 22e-9;
+const double VSCALE_DIV = (R1 + R2) / R2;
 
 struct Motor {
     asc::Param Id, Iq;
@@ -236,28 +253,30 @@ struct Motor {
 };
 
 template<typename T>
-void AngleEstimator<T>::operator()(Motor &motor, T Va, T Vb, T Ia, T Ib) {
-    //Vr_a += (Va + Vemf_a - Vr_a) * Rs * Ts / Ls;
-    //Vr_b += (Vb + Vemf_b - Vr_b) * Rs * Ts / Ls;
-    //Vemf_a = pi_bemf_a(Ia - Vr_a/Rs);
-    //Vemf_b = pi_bemf_b(Ib - Vr_b/Rs);
-    Vemf_a = -motor.oe*Ke*sin(motor.theta);
-    Vemf_b = motor.oe*Ke*cos(motor.theta);
-    angle_err = -motor.oe*Ke*(sin(angle)*cos(motor.theta) - cos(angle)*sin(motor.theta));
-    omega_sum += angle_err * K2 * Ts;
-    omega = omega_sum + K1 * angle_err;
+void AngleEstimator<T>::operator()(Motor &m) {
+    clarke3(m.Vca*VSCALE_DIV, m.Vcb*VSCALE_DIV, m.Vcc*VSCALE_DIV, Va, Vb);
+    const double k = (Rs / Ls) * Ts;
+    Vr_a += k * (Va - Vemf_a - Vr_a);
+    Vr_b += k * (Vb - Vemf_b - Vr_b);
+    Vemf_a = pi_bemf_a(-m.Iab[0] + Vr_a/Rs);
+    Vemf_b = pi_bemf_b(-m.Iab[1] + Vr_b/Rs);
+    Vemf_a_ref = -m.oe*Ke*sin(m.theta);
+    Vemf_b_ref = m.oe*Ke*cos(m.theta);
+    angle_err = -2.0*Vemf_a*Vemf_b*cos(2*angle)+
+            (Vemf_a*Vemf_a-Vemf_b*Vemf_b)*sin(2*angle);
+    omega = omega_pi(angle_err);
     angle += omega * Ts;
-    while (angle > 2 * M_PI) {
-        angle -= 2*M_PI;
-    }
+    while (angle > 2 * M_PI)
+        angle -= 2 * M_PI;
+    while (angle < -2 * M_PI)
+        angle += 2 * M_PI;
 }
 
-const double VSCALE_DIV = (R1 + R2) / R2;
 
 template <typename T>
 static inline void svgen(const array<T, 2> &ab, array<T, 3> &abc, const T Vbus)
 {
-    const T scale = 1.0 / Vbus;
+    const T scale = 2.0 / Vbus;
     iclarke(ab, abc);
 #if 1
     const T mn = fmin(abc[0], fmin(abc[1], abc[2]));
@@ -275,10 +294,12 @@ void Control::operator()(Motor &m)
 {
     array<double, 2> Vab;
     clarke3(m.Vca*VSCALE_DIV, m.Vca*VSCALE_DIV, m.Vca*VSCALE_DIV, Vab[0], Vab[1]);
-    a_est(m, Vab[0], Vab[1], m.Iab[0], m.Iab[1]);
+    a_est(m);
     // current loop
     vdq[0] = pi_id(idq[0] - m.Id, -m.oe * m.Iq * Ls);
     vdq[1] = pi_iq(idq[1] - m.Iq, m.oe * (Ls * m.Id + Ke));
+    //vdq[0] = -10.0;
+    //vdq[1] = 0;
     double a = m.theta;
     if (use_estimator) {
         a = a_est.angle;
@@ -295,7 +316,7 @@ int main()
     s.reserve(100);
     CAPWM pwm(PWM_FREQUENCY, MAX_PERIOD);
     Control ctrl(pwm);
-    double t = 0.0, t_end = .4, dt = 1e-4;
+    double t = 0.0, t_end = 2, dt = 1e-4;
     asc::RK4 integrator;
     asc::Recorder r1, r2, r3;
     Motor motor(s, ctrl);
@@ -305,26 +326,32 @@ int main()
     while (t < t_end) {
         asc::Sampler sampler(t, dt);
         if (t > 1.0)
-            ctrl.idq[1] = -2.0;
-        //if (t > 1e-2)
-        //    ctrl.use_estimator = true;
-        if (pwm(sampler, t))
+            ctrl.idq[1] = 2.0;
+        if (t > 1e-2)
+            ctrl.use_estimator = true;
+        bool tick = false;
+        if (pwm(sampler, t)) {
             ctrl(motor);
-        r1({t, motor.oe, motor.theta});
+            tick = true;
+        }
+        if (tick) r1({t, motor.oe, motor.theta});
         //r1({t, ctrl.vdq[0], ctrl.vdq[1]});
         //t += dt;
         integrator(motor, s, t, dt);
         while (motor.theta > 2 * M_PI) {
             motor.theta -= 2 * M_PI;
         }
+        while (motor.theta < -2 * M_PI) {
+            motor.theta += 2 * M_PI;
+        }
         //r2({t, motor.Iabc[0], motor.Iabc[1], motor.Iabc[2]});
         //r2({t, motor.Id, motor.Iq, motor.oe, motor.theta});
-        r2({t, -motor.oe*Ke*sin(motor.theta), motor.oe*Ke*cos(motor.theta)});
-        r3({t, ctrl.a_est.Vemf_a, ctrl.a_est.Vemf_a,
-            ctrl.a_est.omega, ctrl.a_est.angle, ctrl.a_est.angle_err, ctrl.a_est.angle - motor.theta});
+        if (tick) r2({t, -motor.oe*Ke*sin(motor.theta), motor.oe*Ke*cos(motor.theta)});
+        if (tick) r3({t, ctrl.a_est.Vemf_a, ctrl.a_est.Vemf_b, ctrl.a_est.Vemf_a_ref, ctrl.a_est.Vemf_b_ref,
+            /*,ctrl.a_est.omega, ctrl.a_est.angle, ctrl.a_est.angle_err, ctrl.a_est.angle - motor.theta*/});
     }
     r1.csv("pwm", {"t", "omega", "angle"});
     r2.csv("motor", {"t", "bemf_a", "bemf_b"});
-    r3.csv("observer", {"t", "bemf_a", "bemf_b", "omega", "angle", "angle_err", "a_err"});
+    r3.csv("observer", {"t", "bemf_a", "bemf_b", "bemf_a_ref", "bemf_b_ref"/*, "omega", "angle", "angle_err", "a_err"*/});
     return 0;
 }
