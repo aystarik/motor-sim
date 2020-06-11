@@ -200,7 +200,6 @@ static inline void park(const double sin_phi, const double cos_phi, const array<
    dq[1] = ab[1] * cos_phi - ab[0] * sin_phi;
 }
 
-
 const double R1 = 82e3;
 const double R2 = 5e3;
 const double C = 22e-9;
@@ -208,16 +207,10 @@ const double C = 22e-9;
 const double VSCALE_DIV = (R1 + R2) / R2;
 
 struct Motor {
-    asc::Param Id, Iq;
-    asc::Param oe;
-    asc::Param theta;
+    asc::Param Id, Iq, oe, theta;
     double Vbus;
     array<double, 3> Vabc;
-    array<double, 2> Vab;
-    array<double, 2> Vdq;
     array<double, 3> Iabc;
-    array<double, 2> Idq;
-    array<double, 2> Iab;
     Motor(asc::state_t& state) : Id(state), Iq(state),
         oe(state), theta(state) {
         Iq = Id = 0.0;
@@ -225,17 +218,22 @@ struct Motor {
         theta = 0.0;
     }
     void operator()(const asc::state_t&, asc::state_t& D, const double) {
+        array<double, 2> Vab;
+        array<double, 2> Vdq;
         clarke3(Vabc, Vab);
         park(sin(theta), cos(theta), Vab, Vdq);
-
         Id(D) = (Vdq[0] + oe * Ls * Iq - Rs * Id) / Ls;
         Iq(D) = (Vdq[1] - oe * (Ls * Id + Ke) - Rs * Iq) / Ls;
-        double Te = 1.5 * Ke* poles * Iq;
+
+        double Te = 1.5 * Ke * poles * Iq;
         double Tf = oe;
         Tf = (Tf > Kf) ?  Kf : Tf;
         Tf = (Tf < -Kf)? -Kf : Tf;
-        oe(D) = poles * (Te -Tf - Fv * oe / poles) / (J + Ja);
+        oe(D) = poles * (Te - Tf - Fv * oe / poles) / (J + Ja);
         theta(D) = oe;
+
+        array<double, 2> Idq;
+        array<double, 2> Iab;
         Idq[0] = Id;
         Idq[1] = Iq;
         ipark(sin(theta), cos(theta), Idq, Iab);
