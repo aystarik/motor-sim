@@ -5,6 +5,12 @@
 const double PWM_FREQUENCY = 144e6; // 36kHz update rate
 const unsigned MAX_PERIOD = 2048;
 
+struct d_eps {
+    static constexpr double eps = 1e-9;
+};
+
+using Sampler = asc::SamplerT<double, d_eps>;
+
 using namespace std;
 struct CAPWM {
     double tq;
@@ -23,7 +29,7 @@ struct CAPWM {
         Vabc[0] = Vabc[1] = Vabc[2] = 0.0;
     }
     void setSamplePoint(unsigned x) {chan[3] = x;}
-    bool operator()(asc::Sampler &sampler, double &t) {
+    bool operator()(Sampler &sampler, double &t) {
         if (sampler(tp)) {
             up = !up;
             t0 = t;
@@ -493,7 +499,7 @@ void Simulator::run(Control &ctrl, double t_end) {
     ctrl.pwm_irq(t, *sys);
     //ctrl.om_req = 100;
     while (t < t_end) {
-        asc::Sampler sampler(t, dt);
+        Sampler sampler(t, dt);
         if (sys->pwm(sampler, t)) {
             ctrl.pwm_irq(t, *sys);
             rec({t, sys->getOmega(), sys->getTheta(), ctrl.a_est.omega, ctrl.a_est.angle,
